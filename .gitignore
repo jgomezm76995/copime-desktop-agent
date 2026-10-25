@@ -1,0 +1,19 @@
+# Binarios compilados
+/agent
+/cda
+/cda-darwin-arm64
+/cda-darwin-amd64
+*.exe
+
+# Binarios de Go en install/ (se generan localmente, no se versionan)
+install/cda-darwin-arm64
+install/cda-darwin-amd64
+
+# Directorios de caché de Go
+vendor/
+
+# Archivos de sistema macOS
+.DS_Store
+
+# Archivos de configuración local (contienen credenciales)
+config.json
