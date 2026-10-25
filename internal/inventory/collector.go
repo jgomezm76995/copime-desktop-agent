@@ -68,6 +68,9 @@ type Software struct {
 	Name      string `json:"name"`
 	Version   string `json:"version"`
 	Publisher string `json:"publisher"`
+	// Category clasifica el origen/naturaleza del software para la UI (pestañas en Activos de
+	// soporte): APLICACION, UTILIDAD_SISTEMA, APP_STORE, TERCERO_FIRMADO, TERCERO_SIN_IDENTIFICAR.
+	Category string `json:"category"`
 }
 
 // LiveMetrics es una foto del momento de uso de recursos (no histórico): CPU, RAM y disco

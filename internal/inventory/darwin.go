@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -632,12 +633,57 @@ func determinarTipoRed(nombre string) string {
 }
 
 // spApplicationData modela la estructura JSON de system_profiler SPApplicationsDataType.
+// `obtained_from` y `path` son las claves reales que permiten clasificar el software de forma
+// confiable (a diferencia de adivinar por nombre): "apple" (firmado por Apple), "mac_app_store",
+// "identified_developer" (terceros firmados), "unknown" (sin firma / scripts locales).
 type spApplicationData struct {
 	SPApplicationsDataType []struct {
-		Name    string `json:"_name"`
-		Version string `json:"version"`
-		// El campo "info" a veces contiene el publisher, pero no es consistente.
+		Name         string   `json:"_name"`
+		Version      string   `json:"version"`
+		Path         string   `json:"path"`
+		ObtainedFrom string   `json:"obtained_from"`
+		SignedBy     []string `json:"signed_by"`
 	} `json:"SPApplicationsDataType"`
+}
+
+// developerNamePattern extrae "NOMBRE" de "Developer ID Application: NOMBRE (TEAMID)".
+var developerNamePattern = regexp.MustCompile(`^Developer ID Application:\s*(.+?)\s*\([A-Z0-9]+\)\s*$`)
+
+// clasificarSoftware deriva publisher y category a partir de obtained_from/path/signed_by.
+// Ver docstring de spApplicationData sobre por qué estos campos (y no el nombre) son la fuente.
+func clasificarSoftware(obtainedFrom, path string, signedBy []string) (publisher, category string) {
+	primerFirmante := ""
+	if len(signedBy) > 0 {
+		primerFirmante = signedBy[0]
+	}
+
+	switch obtainedFrom {
+	case "apple":
+		publisher = "Apple Inc."
+		// Apps de uso directo (/System/Applications, /Applications) vs utilidades/helpers en
+		// segundo plano (/System/Applications/Utilities, /System/Library, /Library/Apple).
+		if strings.HasPrefix(path, "/System/Applications/Utilities") ||
+			strings.HasPrefix(path, "/System/Library") ||
+			strings.HasPrefix(path, "/Library/Apple") {
+			category = "UTILIDAD_SISTEMA"
+		} else {
+			category = "APLICACION"
+		}
+	case "mac_app_store":
+		publisher = "Apple Inc. (App Store)"
+		category = "APP_STORE"
+	case "identified_developer":
+		if m := developerNamePattern.FindStringSubmatch(primerFirmante); m != nil {
+			publisher = m[1]
+		} else {
+			publisher = primerFirmante
+		}
+		category = "TERCERO_FIRMADO"
+	default:
+		publisher = ""
+		category = "TERCERO_SIN_IDENTIFICAR"
+	}
+	return publisher, category
 }
 
 func recolectarSoftware() ([]Software, error) {
@@ -656,9 +702,12 @@ func recolectarSoftware() ([]Software, error) {
 		if app.Name == "" {
 			continue
 		}
+		publisher, category := clasificarSoftware(app.ObtainedFrom, app.Path, app.SignedBy)
 		resultado = append(resultado, Software{
-			Name:    app.Name,
-			Version: app.Version,
+			Name:      app.Name,
+			Version:   app.Version,
+			Publisher: publisher,
+			Category:  category,
 		})
 	}
 
