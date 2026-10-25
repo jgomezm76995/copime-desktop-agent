@@ -154,6 +154,80 @@ func enviarUnaVez(cfg Config, deviceID string, inv *inventory.Inventario) (*Resp
 	return &resultado, nil
 }
 
+// peticionContact es el cuerpo del ping liviano (más frecuente que el inventario completo).
+type peticionContact struct {
+	Action string `json:"action"`
+}
+
+// peticionTelemetria es el cuerpo de la respuesta a una solicitud de telemetría bajo demanda.
+type peticionTelemetria struct {
+	Action      string                `json:"action"`
+	LiveMetrics inventory.LiveMetrics `json:"live_metrics"`
+}
+
+// RespuestaContact modela la respuesta del servidor a un `contact` o `telemetry`.
+type RespuestaContact struct {
+	Status             string `json:"status"`
+	SyncIntervalHours  int    `json:"sync_interval_hours"`
+	TelemetryRequested bool   `json:"telemetry_requested"`
+}
+
+// EnviarContact hace un ping liviano al servidor (un solo intento, sin reintentos ni backoff
+// largo: se repite cada pocos minutos de todos modos). Indica si hay una telemetría pendiente.
+func EnviarContact(cfg Config) (*RespuestaContact, error) {
+	return enviarContactoOTelemetria(cfg, peticionContact{Action: "contact"})
+}
+
+// EnviarTelemetria responde a una solicitud de telemetría pendiente con la foto de CPU/RAM/disco.
+func EnviarTelemetria(cfg Config, metrics inventory.LiveMetrics) (*RespuestaContact, error) {
+	return enviarContactoOTelemetria(cfg, peticionTelemetria{Action: "telemetry", LiveMetrics: metrics})
+}
+
+func enviarContactoOTelemetria(cfg Config, peticion any) (*RespuestaContact, error) {
+	url := cfg.ServerURL + "/api/v1/support-assets/agent/inventory"
+
+	cuerpo, err := json.Marshal(peticion)
+	if err != nil {
+		return nil, fmt.Errorf("serializar petición: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(cuerpo))
+	if err != nil {
+		return nil, fmt.Errorf("crear petición HTTP: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Basic "+credencialesBasic(cfg.DeviceID, cfg.Key))
+
+	cliente := &http.Client{Timeout: 15 * time.Second}
+	resp, err := cliente.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("enviar petición al servidor: %w", err)
+	}
+	defer resp.Body.Close()
+
+	cuerpoRespuesta, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("leer respuesta del servidor: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Continúa abajo.
+	case http.StatusUnauthorized:
+		return nil, &ErrCredencialRevocada{Mensaje: "credencial revocada por el servidor (401) — el agente debe detenerse"}
+	case http.StatusTooManyRequests:
+		return nil, &errRateLimited{retryAfterHeader: resp.Header.Get("Retry-After")}
+	default:
+		return nil, fmt.Errorf("respuesta inesperada del servidor: %d — %s", resp.StatusCode, string(cuerpoRespuesta))
+	}
+
+	var resultado RespuestaContact
+	if err := json.Unmarshal(cuerpoRespuesta, &resultado); err != nil {
+		return nil, fmt.Errorf("parsear respuesta del servidor: %w", err)
+	}
+	return &resultado, nil
+}
+
 // credencialesBasic construye el valor del header Authorization para HTTP Basic Auth.
 func credencialesBasic(deviceID, key string) string {
 	return base64.StdEncoding.EncodeToString([]byte(deviceID + ":" + key))

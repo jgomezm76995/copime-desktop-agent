@@ -104,8 +104,12 @@ func ejecutarEnrolamiento(serverURL, codigo, rutaConfig string) {
 	log.Println("El agente está listo. Ejecuta sin flags para iniciar el sync daemon.")
 }
 
-// ejecutarDaemon corre el ciclo de inventario indefinidamente.
+// ejecutarDaemon corre el ciclo de inventario indefinidamente y, en paralelo, un ping liviano
+// de "contact" cada pocos minutos para detectar solicitudes de telemetría bajo demanda (botón
+// "pedir información del momento") sin esperar al próximo inventario completo (hasta 24h).
 func ejecutarDaemon(cfg *config.Config, rutaConfig string) {
+	go cicloContacto(cfg)
+
 	for {
 		if err := cicloInventario(cfg); err != nil {
 			// Si la credencial fue revocada, no tiene sentido continuar.
@@ -131,6 +135,45 @@ func ejecutarDaemon(cfg *config.Config, rutaConfig string) {
 
 		log.Printf("Próximo sync en %v.", intervalo)
 		time.Sleep(intervalo)
+	}
+}
+
+// cicloContacto hace ping al servidor cada 5 minutos (independiente del inventario diario). Si el
+// servidor indica `telemetry_requested`, recolecta y envía una foto de CPU/RAM/disco de inmediato
+// — sin esperar al próximo inventario completo ni consumir su cupo diario.
+func cicloContacto(cfg *config.Config) {
+	const intervaloContacto = 5 * time.Minute
+
+	for {
+		time.Sleep(intervaloContacto)
+
+		senderCfg := sender.Config{ServerURL: cfg.ServerURL, DeviceID: cfg.DeviceID, Key: cfg.Key}
+		respuesta, err := sender.EnviarContact(senderCfg)
+		if err != nil {
+			if _, esRevocada := err.(*sender.ErrCredencialRevocada); esRevocada {
+				log.Printf("CREDENCIAL REVOCADA (detectada en contact): %v", err)
+				os.Exit(1)
+			}
+			log.Printf("[ADVERTENCIA] Error en ping de contact: %v", err)
+			continue
+		}
+
+		if !respuesta.TelemetryRequested {
+			continue
+		}
+
+		log.Println("Telemetría solicitada desde el activo. Recolectando y enviando...")
+		collector := inventory.NuevoCollector()
+		metrics, err := collector.RecolectarMetricasVivo()
+		if err != nil || metrics == nil {
+			log.Printf("[ADVERTENCIA] No se pudo recolectar telemetría bajo demanda: %v", err)
+			continue
+		}
+		if _, err := sender.EnviarTelemetria(senderCfg, *metrics); err != nil {
+			log.Printf("[ADVERTENCIA] No se pudo enviar telemetría bajo demanda: %v", err)
+		} else {
+			log.Println("Telemetría bajo demanda enviada.")
+		}
 	}
 }
 

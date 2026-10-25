@@ -70,6 +70,18 @@ type Software struct {
 	Publisher string `json:"publisher"`
 }
 
+// LiveMetrics es una foto del momento de uso de recursos (no histórico): CPU, RAM y disco
+// actuales. GPU se omite: requiere `powermetrics` con sudo en macOS, fuera del alcance de un
+// agente sin privilegios. Se envía siempre en el inventario periódico y, bajo demanda, en el
+// ciclo liviano de `contact` cuando el servidor marcó una solicitud pendiente.
+type LiveMetrics struct {
+	CPUPercent  float64 `json:"cpu_percent"`
+	RAMUsedMB   int64   `json:"ram_used_mb"`
+	RAMTotalMB  int64   `json:"ram_total_mb"`
+	DiskUsedMB  int64   `json:"disk_used_mb"`
+	DiskTotalMB int64   `json:"disk_total_mb"`
+}
+
 // Inventario agrupa todos los datos del equipo recolectados por el agente.
 type Inventario struct {
 	Hardware        Hardware        `json:"hardware"`
@@ -80,6 +92,7 @@ type Inventario struct {
 	Storages        []Storage       `json:"storages"`
 	Networks        []Network       `json:"networks"`
 	Softwares       []Software      `json:"softwares,omitempty"`
+	LiveMetrics     *LiveMetrics    `json:"live_metrics,omitempty"`
 }
 
 // Collector define la interfaz de recolección de inventario.
@@ -91,4 +104,8 @@ type Collector interface {
 
 	// ObtenerDeviceID retorna un identificador de hardware estable entre reinicios.
 	ObtenerDeviceID() (string, error)
+
+	// RecolectarMetricasVivo recolecta una foto liviana de CPU/RAM/disco (sin inventario completo),
+	// usada tanto dentro de RecolectarInventario como en el ciclo de telemetría bajo demanda.
+	RecolectarMetricasVivo() (*LiveMetrics, error)
 }
