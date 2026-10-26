@@ -1,0 +1,124 @@
+name: build-windows
+
+# Verifica el agente de Windows del COPIME Desktop Agent (CDA) en un runner
+# windows-latest REAL: no basta con que compile por cross-compilation desde otro
+# sistema operativo — este workflow también arranca el binario y ejercita el ciclo
+# de vida completo de registro como servicio de Windows (SCM): instalar, confirmar
+# que corre, desinstalar y confirmar que ya no queda registrado.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Compilar y ejercitar en Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet (todas las plataformas soportadas)
+        run: |
+          go vet ./...
+          $env:GOOS = "darwin"; $env:GOARCH = "arm64"; go vet ./...
+          $env:GOOS = "windows"; $env:GOARCH = "arm64"; go vet ./...
+
+      - name: Compilar cda.exe (amd64, nativo de este runner)
+        run: go build -o cda.exe ./cmd/agent/
+
+      - name: Sanity de cross-compilación (darwin/arm64, windows/arm64)
+        run: |
+          $env:GOOS = "darwin"; $env:GOARCH = "arm64"
+          go build -o cda-darwin-arm64-sanity ./cmd/agent/
+          Remove-Item cda-darwin-arm64-sanity
+          $env:GOOS = "windows"; $env:GOARCH = "arm64"
+          go build -o cda-windows-arm64-sanity.exe ./cmd/agent/
+          Remove-Item cda-windows-arm64-sanity.exe
+
+      - name: Verificar --version
+        run: |
+          $salida = & .\cda.exe --version
+          Write-Host $salida
+          if ($salida -notmatch "COPIME Desktop Agent v") {
+            throw "Salida inesperada de --version: $salida"
+          }
+
+      - name: Preparar configuración de prueba (sin enrolar contra un servidor real)
+        run: |
+          # El ciclo de vida del servicio (instalar/arrancar/detener/eliminar) no
+          # depende de un servidor COPIME real: solo requiere que config.json exista
+          # y pase EstaCompleta(). El device_id/key son ficticios a propósito — el
+          # envío de inventario fallará contra ese server_url y quedará reintentando
+          # en segundo plano, pero eso no bloquea la transición a "Running" ni la
+          # parada del servicio (ver documentación de Execute() en service_windows.go).
+          $configDir = Join-Path $env:ProgramData "COPIME\copime-agent"
+          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          $config = @{
+            server_url           = "http://127.0.0.1:0"
+            device_id             = "ci-test-device"
+            key                   = "ci-test-key"
+            sync_interval_hours   = 24
+            agent_version          = "ci-test"
+          } | ConvertTo-Json
+          Set-Content -Path (Join-Path $configDir "config.json") -Value $config -Encoding UTF8
+
+      - name: Registrar e iniciar el servicio de Windows
+        run: |
+          .\cda.exe --install-service
+          if ($LASTEXITCODE -ne 0) { throw "--install-service falló" }
+
+      - name: Confirmar que el servicio queda Running en el SCM
+        run: |
+          $ok = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            $svc = Get-Service -Name "COPIMEDesktopAgent" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq "Running") { $ok = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $ok) {
+            Get-Service -Name "COPIMEDesktopAgent" -ErrorAction SilentlyContinue | Format-List *
+            throw "El servicio COPIMEDesktopAgent no llegó a estado Running"
+          }
+          Write-Host "Servicio COPIMEDesktopAgent en estado Running — OK"
+
+      - name: Confirmar inicio automático configurado
+        run: |
+          $cfg = Get-Service -Name "COPIMEDesktopAgent" | Select-Object -ExpandProperty StartType
+          Write-Host "StartType: $cfg"
+          if ($cfg -ne "Automatic") {
+            throw "El servicio no quedó configurado con inicio automático (StartType=$cfg)"
+          }
+
+      - name: Detener, eliminar el servicio y confirmar que ya no queda registrado
+        run: |
+          .\cda.exe --uninstall-service
+          if ($LASTEXITCODE -ne 0) { throw "--uninstall-service falló" }
+
+          $svc = Get-Service -Name "COPIMEDesktopAgent" -ErrorAction SilentlyContinue
+          if ($svc) {
+            throw "El servicio COPIMEDesktopAgent sigue registrado tras --uninstall-service"
+          }
+          Write-Host "Servicio COPIMEDesktopAgent eliminado correctamente — OK"
+
+      - name: Mostrar log del agente (diagnóstico, no bloqueante)
+        if: always()
+        run: |
+          $log = Join-Path $env:ProgramData "COPIME\copime-agent\copime-agent.log"
+          if (Test-Path $log) {
+            Get-Content $log -Tail 50
+          } else {
+            Write-Host "Sin archivo de log (no se alcanzó a crear)."
+          }

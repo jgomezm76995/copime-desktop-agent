@@ -1,15 +1,17 @@
 # COPIME Desktop Agent (CDA)
 
-Agente de inventario de hardware y software para el ERP COPIME. Reemplaza GLPI Agent (Perl, terceros) con una implementación propia en Go — sin dependencias externas, multiplataforma y diseñada para ejecutarse como daemon de sistema.
+Agente de inventario de hardware y software para el ERP COPIME. Reemplaza GLPI Agent (Perl, terceros) con una implementación propia en Go — multiplataforma y diseñada para ejecutarse como daemon/servicio de sistema.
 
 ## Características
 
 - **Enrolamiento seguro** con código de un solo uso
-- **Inventario macOS** vía herramientas nativas (`system_profiler`, `sysctl`, `ifconfig`, `ioreg`)
+- **Inventario macOS** vía herramientas nativas (`system_profiler`, `sysctl`, `ifconfig`, `ioreg`) — sin dependencias externas, solo stdlib de Go
+- **Inventario Windows** vía WMI (`Get-CimInstance` como subproceso de PowerShell) para hardware/SO/CPU/RAM/disco/red, y lectura directa del registro de desinstalación para software instalado — única dependencia externa: `golang.org/x/sys` (extensión oficial de Go para Windows, sin cgo)
 - **Sync periódico** con intervalo configurable por el servidor
 - **Backoff exponencial** ante errores de red (1 min → 4 horas máximo)
 - **Respeto de `Retry-After`** en respuestas 429
 - **Daemon launchd** para inicio automático en macOS
+- **Servicio de Windows (SCM)** con inicio automático, registrado vía `golang.org/x/sys/windows/svc`
 
 ## Compilación
 
@@ -20,9 +22,26 @@ GOOS=darwin GOARCH=arm64 go build -o cda-darwin-arm64 ./cmd/agent/
 # macOS Intel (amd64)
 GOOS=darwin GOARCH=amd64 go build -o cda-darwin-amd64 ./cmd/agent/
 
+# Windows (amd64 / arm64) — compila igual desde macOS/Linux, sin cgo ni toolchain de Windows
+GOOS=windows GOARCH=amd64 go build -o cda-windows-amd64.exe ./cmd/agent/
+GOOS=windows GOARCH=arm64 go build -o cda-windows-arm64.exe ./cmd/agent/
+
 # Con versión embebida
 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=0.1.0" -o cda-darwin-arm64 ./cmd/agent/
 ```
+
+## Releases publicados
+
+Empujar un tag `vX.Y.Z` dispara `.github/workflows/release.yml`, que compila los
+binarios de macOS (arm64 y amd64) y Windows (amd64 y arm64) con esa versión embebida
+y los publica como artefactos descargables de un GitHub Release, junto a un
+`checksums-X.Y.Z.txt` con su SHA-256. Un administrador de ERP_Copime toma esos tres
+datos (`file_name`, `version`, `sha256`) para registrar el instalador de la
+plataforma correspondiente (`macos` o `windows`) vía
+`PUT /support-assets/config/agent-installer` (ver
+`backend/src/modules/support-assets/agent/agent-installer.service.ts` en el repo
+`ERP_Copime`). Linux se agrega a este workflow el día que exista una implementación
+real del collector para esa plataforma.
 
 ## Instalación en macOS
 
@@ -42,10 +61,33 @@ El instalador:
 4. Instala el plist en `/Library/LaunchDaemons/`
 5. Registra el servicio con `launchctl bootstrap`
 
+## Instalación en Windows
+
+```bat
+:: 1. Compilar el binario (desde cualquier plataforma) y copiarlo junto a install.bat
+go build -o install\cda.exe .\cmd\agent\
+
+:: 2. Ejecutar el instalador como Administrador
+cd install
+install.bat --server https://conasinf.copime.net --enroll-code XXXX-XXXX
+```
+
+El instalador:
+1. Copia el binario a `%ProgramFiles%\COPIME\copime-agent\cda.exe`
+2. Crea `%ProgramData%\COPIME\copime-agent\`
+3. Ejecuta el enrolamiento y guarda `config.json`
+4. Registra el servicio `COPIMEDesktopAgent` en el Service Control Manager (inicio automático) y lo arranca
+
 ## Desinstalación
 
 ```bash
+# macOS
 sudo ./install/install.sh --uninstall
+```
+
+```bat
+:: Windows (como Administrador)
+install.bat --uninstall
 ```
 
 ## Uso manual
@@ -65,11 +107,16 @@ cda --version
 
 # Configuración personalizada
 cda --config /ruta/alternativa/config.json --once
+
+# Windows: registrar/eliminar el servicio de Windows manualmente (install.bat ya lo hace)
+cda.exe --install-service
+cda.exe --uninstall-service
 ```
 
 ## Configuración
 
-Archivo: `/etc/copime-agent/config.json` (permisos 0600, dueño root)
+- macOS/Linux: `/etc/copime-agent/config.json` (permisos 0600, dueño root)
+- Windows: `%ProgramData%\COPIME\copime-agent\config.json`
 
 ```json
 {
@@ -86,23 +133,32 @@ Archivo: `/etc/copime-agent/config.json` (permisos 0600, dueño root)
 ```
 copime-desktop-agent/
   go.mod                                     Módulo Go
-  cmd/agent/main.go                          Punto de entrada, flags CLI, lógica de modos
+  cmd/agent/
+    main.go                                 Punto de entrada, flags CLI, lógica de modos
+    service_windows.go                      Registro/ejecución como servicio de Windows (build tag: windows)
+    service_other.go                        Stubs de lo anterior en macOS/Linux (build tag: !windows)
   internal/
-    config/config.go                         Lectura/escritura de config.json
+    config/
+      config.go                             Lectura/escritura de config.json (multiplataforma)
+      config_unix.go                        RutaConfig por defecto en macOS/Linux (build tag: !windows)
+      config_windows.go                     RutaConfig por defecto en Windows (build tag: windows)
     enroll/enroll.go                         Flujo de enrolamiento con el servidor
     inventory/
       collector.go                           Interfaz Collector + tipos de datos
       darwin.go                              Implementación macOS (build tag: darwin)
+      windows.go                             Implementación Windows (build tag: windows)
     sender/sender.go                         HTTP client con auth Basic, retry y backoff
   install/
-    install.sh                               Script de instalación/desinstalación
+    install.sh                               Instalador macOS (launchd)
     com.conasinf.copime-agent.plist          Plist de launchd
+    install.bat                              Instalador Windows (SCM)
   README.md
 ```
 
 ## Logs
 
-El daemon escribe en `/var/log/copime-agent.log`:
+- macOS: el daemon escribe en `/var/log/copime-agent.log` (vía StandardOutPath del plist).
+- Windows: el servicio escribe en `%ProgramData%\COPIME\copime-agent\copime-agent.log` (el SCM no redirige stdout/stderr por sí solo).
 
 ```
 [CDA] 2024/01/15 10:30:00 Configuración cargada. DeviceID: cad_abc123 — Servidor: https://conasinf.copime.net
@@ -114,8 +170,8 @@ El daemon escribe en `/var/log/copime-agent.log`:
 ## Requisitos
 
 - Go 1.22+
-- macOS 13+ (Ventura) recomendado; compatible con macOS 12+
-- Sin dependencias externas — solo stdlib de Go
+- macOS 13+ (Ventura) recomendado; compatible con macOS 12+ — sin dependencias externas, solo stdlib de Go
+- Windows 10/11, Server 2016+ — requiere PowerShell (incluido por defecto); única dependencia externa del módulo: `golang.org/x/sys`
 
 ## Protocolo del servidor
 
