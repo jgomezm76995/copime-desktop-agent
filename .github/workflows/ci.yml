@@ -1,0 +1,26 @@
+name: CI
+
+# Verificación mínima en cada PR/push: que el módulo compile para la plataforma soportada hoy
+# (macOS). No hay pruebas automatizadas todavía (no existe ningún *_test.go en el repo);
+# agregarlas queda fuera de este workflow — esto es solo el smoke check de compilación que
+# protege la rama antes de que `release.yml` pueda llegar a construir un binario roto.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: Compilar macOS arm64
+        run: GOOS=darwin GOARCH=arm64 go build -o /tmp/cda-darwin-arm64 ./cmd/agent/
+      - name: Compilar macOS amd64
+        run: GOOS=darwin GOARCH=amd64 go build -o /tmp/cda-darwin-amd64 ./cmd/agent/
