@@ -1,5 +1,9 @@
 // Package config maneja la lectura y escritura del archivo de configuración
-// local del COPIME Desktop Agent en /etc/copime-agent/config.json.
+// local del COPIME Desktop Agent. La ubicación por defecto (RutaConfig) es
+// específica de cada plataforma — ver config_unix.go y config_windows.go — porque
+// Unix y Windows no comparten convención de directorio de configuración de sistema
+// (/etc vs. %ProgramData%). El resto de este archivo (lectura, escritura, formato
+// JSON) es idéntico en todas las plataformas.
 package config
 
 import (
@@ -8,9 +12,6 @@ import (
 	"os"
 	"path/filepath"
 )
-
-// RutaConfig es la ubicación por defecto del archivo de configuración.
-const RutaConfig = "/etc/copime-agent/config.json"
 
 // Config representa la configuración persistente del agente.
 type Config struct {
