@@ -24,6 +24,18 @@ GOOS=darwin GOARCH=amd64 go build -o cda-darwin-amd64 ./cmd/agent/
 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=0.1.0" -o cda-darwin-arm64 ./cmd/agent/
 ```
 
+## Releases publicados
+
+Empujar un tag `vX.Y.Z` dispara `.github/workflows/release.yml`, que compila los
+binarios de macOS (arm64 y amd64) con esa versión embebida y los publica como
+artefactos descargables de un GitHub Release, junto a un `checksums-X.Y.Z.txt` con su
+SHA-256. Un administrador de ERP_Copime toma esos tres datos (`file_name`, `version`,
+`sha256`) para registrar el instalador de la plataforma `macos` vía
+`PUT /support-assets/config/agent-installer` (ver
+`backend/src/modules/support-assets/agent/agent-installer.service.ts` en el repo
+`ERP_Copime`). Windows y Linux se agregan a este workflow el día que exista una
+implementación real del collector para esa plataforma.
+
 ## Instalación en macOS
 
 ```bash

@@ -1,0 +1,77 @@
+name: Release
+
+# Publica los binarios de COPIME Desktop Agent (CDA) como artefactos DESCARGABLES de un
+# GitHub Release, junto a su SHA-256, cada vez que se empuja un tag `vX.Y.Z` a este repo.
+#
+# Motivo (TT11511): el contrato de entrega del instalador en ERP_Copime
+# (`backend/src/modules/support-assets/agent/agent-installer.service.ts`) registra, por
+# plataforma, el `file_name`/`version`/`sha256` vigente — pero ese registro lo escribe a
+# mano un administrador, y hasta ahora no había ningún binario de CDA publicado en un
+# lugar accesible desde el que copiar esos tres datos. Este workflow resuelve exactamente
+# eso para macOS (la única plataforma con una implementación real hoy, ver `internal/inventory`);
+# Windows/Linux se agregan aquí el día que exista una implementación de ese collector.
+#
+# El binario NO se autoinstala ni se autoregistra en ERP_Copime: un administrador sigue
+# siendo quien decide, descarga y registra la versión vigente vía
+# `PUT /support-assets/config/agent-installer` — este workflow solo le da algo real que
+# descargar y un SHA-256 verificable para ese registro.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag a publicar (p. ej. v0.2.0); requerido al disparar a mano"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolver versión (sin la "v" del tag)
+        id: ver
+        run: |
+          raw="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar macOS arm64 (Apple Silicon)
+        run: |
+          GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/cda-darwin-arm64-${{ steps.ver.outputs.version }} ./cmd/agent/
+
+      - name: Compilar macOS amd64 (Intel)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/cda-darwin-amd64-${{ steps.ver.outputs.version }} ./cmd/agent/
+
+      - name: Checksums SHA-256
+        run: |
+          cd dist
+          shasum -a 256 cda-darwin-arm64-${{ steps.ver.outputs.version }} \
+                         cda-darwin-amd64-${{ steps.ver.outputs.version }} \
+            > checksums-${{ steps.ver.outputs.version }}.txt
+          cat checksums-${{ steps.ver.outputs.version }}.txt
+
+      - name: Publicar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: "CDA ${{ steps.ver.outputs.version }}"
+          files: |
+            dist/cda-darwin-arm64-${{ steps.ver.outputs.version }}
+            dist/cda-darwin-amd64-${{ steps.ver.outputs.version }}
+            dist/checksums-${{ steps.ver.outputs.version }}.txt
