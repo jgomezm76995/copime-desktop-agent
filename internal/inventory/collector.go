@@ -73,16 +73,29 @@ type Software struct {
 	Category string `json:"category"`
 }
 
+// Partition representa una partición/volumen de almacenamiento real y visible para el usuario en
+// ESTE equipo (p.ej. "Macintosh HD", un disco secundario interno, una unidad externa montada).
+// Deliberadamente una LISTA y no un solo total: un equipo puede tener más de un disco físico o
+// partición real, y un solo número agregado no los distingue (TT11524). Cada implementación de
+// plataforma (darwin, y a futuro linux/windows) decide qué cuenta como "real" vs. pseudo-volumen
+// interno del propio sistema operativo — ver el comentario de `recolectarParticiones` en
+// darwin.go para el criterio verificado en macOS.
+type Partition struct {
+	Name       string `json:"name"`        // nombre visible del volumen (p.ej. "Macintosh HD")
+	MountPoint string `json:"mount_point"` // punto de montaje real (p.ej. "/", "/Volumes/Backup")
+	UsedMB     int64  `json:"used_mb"`
+	TotalMB    int64  `json:"total_mb"`
+}
+
 // LiveMetrics es una foto del momento de uso de recursos (no histórico): CPU, RAM y disco
 // actuales. GPU se omite: requiere `powermetrics` con sudo en macOS, fuera del alcance de un
 // agente sin privilegios. Se envía siempre en el inventario periódico y, bajo demanda, en el
 // ciclo liviano de `contact` cuando el servidor marcó una solicitud pendiente.
 type LiveMetrics struct {
-	CPUPercent  float64 `json:"cpu_percent"`
-	RAMUsedMB   int64   `json:"ram_used_mb"`
-	RAMTotalMB  int64   `json:"ram_total_mb"`
-	DiskUsedMB  int64   `json:"disk_used_mb"`
-	DiskTotalMB int64   `json:"disk_total_mb"`
+	CPUPercent float64     `json:"cpu_percent"`
+	RAMUsedMB  int64       `json:"ram_used_mb"`
+	RAMTotalMB int64       `json:"ram_total_mb"`
+	Partitions []Partition `json:"disk_partitions"`
 }
 
 // Inventario agrupa todos los datos del equipo recolectados por el agente.

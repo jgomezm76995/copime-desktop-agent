@@ -133,10 +133,10 @@ func (d *DarwinCollector) RecolectarMetricasVivo() (*LiveMetrics, error) {
 		log.Printf("[ADVERTENCIA] No se pudo recolectar uso de RAM: %v", err)
 	}
 
-	if usedMB, totalMB, err := recolectarDiscoUso(); err == nil {
-		m.DiskUsedMB, m.DiskTotalMB = usedMB, totalMB
+	if particiones, err := recolectarParticiones(); err == nil {
+		m.Partitions = particiones
 	} else {
-		log.Printf("[ADVERTENCIA] No se pudo recolectar uso de disco: %v", err)
+		log.Printf("[ADVERTENCIA] No se pudo recolectar particiones de disco: %v", err)
 	}
 
 	return m, nil
@@ -238,30 +238,110 @@ func recolectarRAMUso() (usedMB, totalMB int64, err error) {
 	return usedMB, totalMB, nil
 }
 
-// recolectarDiscoUso usa `df -k /` (volumen raíz) para uso/total en MB.
-func recolectarDiscoUso() (usedMB, totalMB int64, err error) {
-	salida, err := ejecutarComando("df", "-k", "/")
+// recolectarParticiones usa `df -k` para listar TODAS las particiones/volúmenes reales y
+// visibles para el usuario en este equipo, excluyendo pseudo-volúmenes internos de macOS.
+//
+// Causa raíz del bug original (TT11524): la implementación anterior usaba `df -k /` (solo el
+// volumen raíz) para el total/uso de disco. Desde Catalina, macOS usa un "volumen de sistema
+// sellado" (APFS): "/" es un snapshot de solo lectura, pequeño y casi vacío (en el equipo real
+// reportado: 228Gi totales, 13Gi en uso = ~6-12%), mientras que TODOS los datos reales del
+// usuario viven en el volumen de datos, montado en "/System/Volumes/Data" (en el mismo equipo:
+// ~50% de uso — el número que de verdad coincide con lo que Ajustes del Sistema →
+// Almacenamiento le muestra al usuario). Verificado también en este equipo de desarrollo:
+// `diskutil apfs list` confirma que "/" (disk3s1s1, rol System) y "/System/Volumes/Data"
+// (disk3s5, rol Data) son el MISMO contenedor APFS — exactamente el par que Finder/Ajustes
+// presentan fusionado como un solo volumen lógico ("Macintosh HD").
+//
+// Criterio de "partición real" vs. "pseudo-volumen de sistema" (decisión de esta implementación,
+// no hay una sola API de Apple que lo exponga directamente sin privilegios elevados):
+//   - Se descarta cualquier filesystem que no sea un dispositivo de bloque real (`devfs`, montajes
+//     autofs como "map auto_home"): nunca representan almacenamiento del equipo.
+//   - Se descarta cualquier punto de montaje bajo "/System/Volumes/" EXCEPTO "Data": Preboot, VM,
+//     Update, Hardware, iSCPreboot, xarts, Recovery son volúmenes internos del propio sistema
+//     operativo (gestión de arranque, swap, actualizaciones) — nunca aparecen en Finder ni son
+//     relevantes para el usuario.
+//   - El volumen raíz "/" en sí NUNCA se reporta con sus propios números (son los del snapshot
+//     sellado, casi siempre con uso real ~0): se descarta y se sustituye por
+//     "/System/Volumes/Data" retitulado como "/", que es el que lleva el uso real de ESE mismo
+//     volumen lógico.
+//   - Cualquier OTRO punto de montaje real (p.ej. un segundo disco interno, una unidad externa en
+//     "/Volumes/...") se reporta como partición adicional e independiente — este es el soporte
+//     explícito para equipos con más de un disco físico o partición real.
+func recolectarParticiones() ([]Partition, error) {
+	salida, err := ejecutarComando("df", "-k")
 	if err != nil {
-		return 0, 0, fmt.Errorf("df: %w", err)
+		return nil, fmt.Errorf("df: %w", err)
 	}
+
 	lineas := strings.Split(strings.TrimSpace(salida), "\n")
 	if len(lineas) < 2 {
-		return 0, 0, fmt.Errorf("salida de df sin datos")
+		return nil, fmt.Errorf("salida de df sin datos")
 	}
-	campos := strings.Fields(lineas[len(lineas)-1])
-	// Formato: Filesystem 1K-blocks Used Available Capacity ... Mounted on
-	if len(campos) < 4 {
-		return 0, 0, fmt.Errorf("formato inesperado de df")
+
+	var resultado []Partition
+	for _, linea := range lineas[1:] {
+		campos := strings.Fields(linea)
+		// Formato: Filesystem 1K-blocks Used Available Capacity iused ifree %iused Mounted on
+		if len(campos) < 9 {
+			continue
+		}
+		filesystem := campos[0]
+		puntoMontaje := campos[len(campos)-1]
+
+		if !strings.HasPrefix(filesystem, "/dev/") {
+			continue // devfs, montajes autofs (p.ej. "map auto_home"): no son almacenamiento real
+		}
+		if puntoMontaje == "/" {
+			continue // volumen de sistema sellado: números no representativos, ver docstring
+		}
+		if strings.HasPrefix(puntoMontaje, "/System/Volumes/") && puntoMontaje != "/System/Volumes/Data" {
+			continue // Preboot/VM/Update/Hardware/iSCPreboot/xarts/Recovery: internos de macOS
+		}
+
+		totalKB, errTotal := strconv.ParseInt(campos[1], 10, 64)
+		usedKB, errUsed := strconv.ParseInt(campos[2], 10, 64)
+		if errTotal != nil || errUsed != nil {
+			continue // línea con formato inesperado: se omite en vez de abortar toda la recolección
+		}
+
+		if puntoMontaje == "/System/Volumes/Data" {
+			puntoMontaje = "/" // mismo volumen lógico que macOS presenta fusionado como "Macintosh HD"
+		}
+
+		resultado = append(resultado, Partition{
+			Name:       nombreVolumen(puntoMontaje),
+			MountPoint: puntoMontaje,
+			UsedMB:     usedKB / 1024,
+			TotalMB:    totalKB / 1024,
+		})
 	}
-	totalKB, err := strconv.ParseInt(campos[1], 10, 64)
+
+	if len(resultado) == 0 {
+		return nil, fmt.Errorf("no se encontraron particiones reales en la salida de df")
+	}
+
+	return resultado, nil
+}
+
+// nombreVolumen obtiene el nombre visible del volumen (p.ej. "Macintosh HD") vía `diskutil info`.
+// Si el comando falla o no expone "Volume Name", se usa el punto de montaje como respaldo.
+func nombreVolumen(puntoMontaje string) string {
+	salida, err := ejecutarComando("diskutil", "info", puntoMontaje)
 	if err != nil {
-		return 0, 0, fmt.Errorf("parsear total de df: %w", err)
+		return puntoMontaje
 	}
-	usedKB, err := strconv.ParseInt(campos[2], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parsear usado de df: %w", err)
+	for _, linea := range strings.Split(salida, "\n") {
+		if !strings.Contains(linea, "Volume Name:") {
+			continue
+		}
+		partes := strings.SplitN(linea, ":", 2)
+		if len(partes) == 2 {
+			if nombre := strings.TrimSpace(partes[1]); nombre != "" {
+				return nombre
+			}
+		}
 	}
-	return usedKB / 1024, totalKB / 1024, nil
+	return puntoMontaje
 }
 
 // --- Funciones privadas de recolección ---
