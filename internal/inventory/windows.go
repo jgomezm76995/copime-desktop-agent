@@ -144,13 +144,23 @@ func (w *WindowsCollector) RecolectarMetricasVivo() (*LiveMetrics, error) {
 		log.Printf("[ADVERTENCIA] No se pudo recolectar uso de RAM")
 	}
 
-	if datos.Disk != nil {
-		totalMB := int64(datos.Disk.Size) / 1024 / 1024
-		libreMB := int64(datos.Disk.FreeSpace) / 1024 / 1024
-		m.DiskTotalMB = totalMB
-		m.DiskUsedMB = totalMB - libreMB
-		if m.DiskUsedMB < 0 {
-			m.DiskUsedMB = 0
+	if len(datos.Disks) > 0 {
+		for _, d := range datos.Disks {
+			totalMB := int64(d.Size) / 1024 / 1024
+			if totalMB <= 0 {
+				continue // unidad sin tamaño reportado (p.ej. lectora vacía que igual pasó el filtro): no es representable
+			}
+			libreMB := int64(d.FreeSpace) / 1024 / 1024
+			usedMB := totalMB - libreMB
+			if usedMB < 0 {
+				usedMB = 0
+			}
+			m.Partitions = append(m.Partitions, Partition{
+				Name:       d.DeviceID,
+				MountPoint: d.DeviceID,
+				UsedMB:     usedMB,
+				TotalMB:    totalMB,
+			})
 		}
 	} else {
 		log.Printf("[ADVERTENCIA] No se pudo recolectar uso de disco")
@@ -292,9 +302,9 @@ type wmiInventarioCompleto struct {
 }
 
 type wmiMetricasVivo struct {
-	OS   *wmiOperatingSystem `json:"os"`
-	CPUs []wmiProcessor      `json:"cpus"`
-	Disk *wmiLogicalDisk     `json:"disk"`
+	OS    *wmiOperatingSystem `json:"os"`
+	CPUs  []wmiProcessor      `json:"cpus"`
+	Disks []wmiLogicalDisk    `json:"disks"`
 }
 
 // scriptInventarioCompleto consulta en un solo proceso de PowerShell todas las
@@ -343,9 +353,11 @@ const scriptMetricasVivo = `
 $ErrorActionPreference = 'Stop'
 $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1 TotalVisibleMemorySize, FreePhysicalMemory
 $cpus = @(Get-CimInstance Win32_Processor | Select-Object LoadPercentage)
-$sysDrive = $env:SystemDrive
-$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" | Select-Object -First 1 Size, FreeSpace
-([ordered]@{ os = $os; cpus = $cpus; disk = $disk }) | ConvertTo-Json -Depth 4 -Compress
+# DriveType=3 = unidad de disco fijo local (excluye CD-ROM, removibles y unidades de red
+# mapeadas — ninguna de esas es una partición real del equipo). Todas las unidades, no solo
+# la del sistema (TT11524): un equipo puede tener más de un disco físico o partición real.
+$disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID, Size, FreeSpace)
+([ordered]@{ os = $os; cpus = $cpus; disks = $disks }) | ConvertTo-Json -Depth 4 -Compress
 `
 
 func recolectarDatosWMI() (*wmiInventarioCompleto, error) {
