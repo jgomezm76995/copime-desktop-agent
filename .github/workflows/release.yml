@@ -7,9 +7,12 @@ name: Release
 # (`backend/src/modules/support-assets/agent/agent-installer.service.ts`) registra, por
 # plataforma, el `file_name`/`version`/`sha256` vigente — pero ese registro lo escribe a
 # mano un administrador, y hasta ahora no había ningún binario de CDA publicado en un
-# lugar accesible desde el que copiar esos tres datos. Este workflow resuelve exactamente
-# eso para macOS (la única plataforma con una implementación real hoy, ver `internal/inventory`);
-# Windows/Linux se agregan aquí el día que exista una implementación de ese collector.
+# lugar accesible desde el que copiar esos tres datos. Este workflow resuelve eso para
+# macOS y Windows (las dos plataformas con una implementación real de `internal/inventory`
+# hoy, TT11499/TT11512); Linux se agrega aquí el día que exista una implementación de ese
+# collector. Windows se cross-compila desde este mismo runner (sin cgo, ver README) — la
+# verificación real de que el binario arranca y se registra como servicio en Windows la
+# cubre `build-windows.yml` en cada PR, no este workflow de publicación.
 #
 # El binario NO se autoinstala ni se autoregistra en ERP_Copime: un administrador sigue
 # siendo quien decide, descarga y registra la versión vigente vía
@@ -58,11 +61,25 @@ jobs:
             -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
             -o dist/cda-darwin-amd64-${{ steps.ver.outputs.version }} ./cmd/agent/
 
+      - name: Compilar Windows amd64
+        run: |
+          GOOS=windows GOARCH=amd64 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/cda-windows-amd64-${{ steps.ver.outputs.version }}.exe ./cmd/agent/
+
+      - name: Compilar Windows arm64
+        run: |
+          GOOS=windows GOARCH=arm64 go build \
+            -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
+            -o dist/cda-windows-arm64-${{ steps.ver.outputs.version }}.exe ./cmd/agent/
+
       - name: Checksums SHA-256
         run: |
           cd dist
           shasum -a 256 cda-darwin-arm64-${{ steps.ver.outputs.version }} \
                          cda-darwin-amd64-${{ steps.ver.outputs.version }} \
+                         cda-windows-amd64-${{ steps.ver.outputs.version }}.exe \
+                         cda-windows-arm64-${{ steps.ver.outputs.version }}.exe \
             > checksums-${{ steps.ver.outputs.version }}.txt
           cat checksums-${{ steps.ver.outputs.version }}.txt
 
@@ -74,4 +91,6 @@ jobs:
           files: |
             dist/cda-darwin-arm64-${{ steps.ver.outputs.version }}
             dist/cda-darwin-amd64-${{ steps.ver.outputs.version }}
+            dist/cda-windows-amd64-${{ steps.ver.outputs.version }}.exe
+            dist/cda-windows-arm64-${{ steps.ver.outputs.version }}.exe
             dist/checksums-${{ steps.ver.outputs.version }}.txt
