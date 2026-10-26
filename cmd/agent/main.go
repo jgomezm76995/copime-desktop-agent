@@ -30,6 +30,10 @@ func main() {
 	flagConfig := flag.String("config", config.RutaConfig, "Ruta al archivo de configuración")
 	flagOnce := flag.Bool("once", false, "Ejecutar un solo ciclo de inventario y salir (para depuración)")
 	flagVersion := flag.Bool("version", false, "Mostrar la versión del agente y salir")
+	flagInstallService := flag.Bool("install-service", false,
+		"(Windows) Registrar el agente como servicio de Windows con inicio automático e iniciarlo")
+	flagUninstallService := flag.Bool("uninstall-service", false,
+		"(Windows) Detener y eliminar el registro del servicio de Windows del agente")
 
 	flag.Parse()
 
@@ -41,6 +45,23 @@ func main() {
 	if *flagVersion {
 		fmt.Printf("COPIME Desktop Agent v%s\n", version)
 		os.Exit(0)
+	}
+
+	// --- Flags de gestión del servicio de Windows (no-op con error claro en otras
+	// plataformas — ver service_windows.go / service_other.go) ---
+	if *flagInstallService {
+		if err := instalarServicioWindows(); err != nil {
+			log.Fatalf("ERROR al instalar el servicio: %v", err)
+		}
+		log.Println("Servicio instalado e iniciado.")
+		return
+	}
+	if *flagUninstallService {
+		if err := desinstalarServicioWindows(); err != nil {
+			log.Fatalf("ERROR al desinstalar el servicio: %v", err)
+		}
+		log.Println("Servicio detenido y eliminado.")
+		return
 	}
 
 	// --- Determinar modo de operación ---
@@ -61,6 +82,14 @@ func main() {
 			log.Fatalf("Error en ciclo de inventario: %v", err)
 		}
 		log.Println("Ciclo completado. Saliendo.")
+		return
+	}
+
+	// Si el SCM de Windows arrancó este proceso, ceder el control al despachador
+	// de servicio en vez del bucle normal — ver service_windows.go. En cualquier
+	// otra plataforma esServicioWindows() siempre es false y esta rama no aplica.
+	if esServicioWindows() {
+		correrComoServicioWindows(cfg, *flagConfig)
 		return
 	}
 
