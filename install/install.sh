@@ -131,6 +131,18 @@ fi
 echo "  Instalando binario ($ARCH) en $INSTALL_DIR/$BINARY_NAME..."
 install -m 755 "$BINARY_SRC" "$INSTALL_DIR/$BINARY_NAME"
 
+# Si el .zip de release se descargó con el navegador, macOS marca cada
+# archivo extraído con el atributo extendido com.apple.quarantine; Gatekeeper
+# puede matar en silencio (SIGKILL) un binario quarantined que no está
+# notarizado por Apple, incluso ya con firma ad-hoc — es un mecanismo
+# independiente del chequeo de firma de AMFI de más abajo. Se quita solo ese
+# atributo puntual, nunca todos los xattrs; `|| true` porque si el binario no
+# lo trae (p. ej. compilado localmente), xattr -d falla y no debe bloquear.
+if xattr -p com.apple.quarantine "$INSTALL_DIR/$BINARY_NAME" &>/dev/null; then
+  echo "  Quitando atributo de cuarentena (com.apple.quarantine) del binario..."
+  xattr -d com.apple.quarantine "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
+fi
+
 # En Apple Silicon el kernel exige al menos una firma ad-hoc para ejecutar
 # cualquier binario; uno sin firmar se mata con SIGKILL en el primer exec, sin
 # diálogo de Gatekeeper ni mensaje claro. `codesign` es una utilidad del
