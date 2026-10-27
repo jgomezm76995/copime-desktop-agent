@@ -24,6 +24,17 @@ import (
 // se usa la ruta por defecto documentada por Microsoft como respaldo.
 var RutaConfig = construirRutaConfig()
 
+// PermsDirectorio y PermsArchivo son los modos que Guardar (en config.go) pasa a
+// os.MkdirAll/os.WriteFile. Go los aplica solo parcialmente en Windows (el control
+// de acceso real ahí es ACL de NTFS, no bits POSIX) — se mantienen con el mismo
+// valor que ya tenía Guardar hardcodeado antes de este cambio, únicamente para que
+// Guardar tenga una sola firma multiplataforma; el control de acceso real en esta
+// plataforma es el de %ProgramData% (ver comentario de RutaConfig arriba).
+const (
+	PermsDirectorio os.FileMode = 0700
+	PermsArchivo    os.FileMode = 0600
+)
+
 func construirRutaConfig() string {
 	base := os.Getenv("ProgramData")
 	if base == "" {

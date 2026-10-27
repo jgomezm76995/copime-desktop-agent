@@ -52,10 +52,13 @@ func Leer(ruta string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Guardar persiste la configuración en la ruta indicada con permisos 0600.
-// Crea los directorios padres si no existen (con permisos 0700).
+// Guardar persiste la configuración en la ruta indicada con permisos PermsArchivo.
+// Crea los directorios padres si no existen (con permisos PermsDirectorio).
+// Ambas constantes son específicas de cada plataforma (ver config_unix.go,
+// config_darwin.go, config_windows.go) porque quién necesita LEER config.json en
+// cada arranque del agente depende de cómo se registra el servicio ahí.
 func Guardar(ruta string, cfg *Config) error {
-	if err := os.MkdirAll(filepath.Dir(ruta), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(ruta), PermsDirectorio); err != nil {
 		return fmt.Errorf("crear directorio de config: %w", err)
 	}
 
@@ -64,8 +67,7 @@ func Guardar(ruta string, cfg *Config) error {
 		return fmt.Errorf("serializar config: %w", err)
 	}
 
-	// Escribir con permisos 0600 (solo root puede leer).
-	if err := os.WriteFile(ruta, datos, 0600); err != nil {
+	if err := os.WriteFile(ruta, datos, PermsArchivo); err != nil {
 		return fmt.Errorf("escribir config: %w", err)
 	}
 

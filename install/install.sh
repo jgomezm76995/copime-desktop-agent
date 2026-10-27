@@ -7,17 +7,50 @@
 #
 # El script requiere permisos de root para:
 #   - Copiar el binario a /usr/local/bin/
-#   - Crear /etc/copime-agent/ (modo 700)
-#   - Instalar el plist en /Library/LaunchDaemons/
+#   - Crear /etc/copime-agent/ (modo 755 — ver nota de LaunchAgent abajo)
+#   - Instalar el plist en /Library/LaunchAgents/
+#   - Crear /Library/Logs/COPIME/ (modo 755, log pre-creado en modo 666 — ver nota
+#     de LaunchAgent abajo)
 #   - Registrar el servicio con launchctl
+#
+# Nota — LaunchAgent, no LaunchDaemon: a nivel de confianza de firma, launchd
+# ACEPTA la firma ad-hoc del binario (ver codesign más abajo) cuando el servicio se
+# registra como LaunchAgent (dominio "gui/<uid>", corre como un usuario normal), pero
+# la RECHAZA con "Bootstrap failed: 5: Input/output error" cuando se registra como
+# LaunchDaemon de sistema (dominio "system", corre como root) — verificado en una Mac
+# real reproduciendo ambos casos con el mismo binario. La alternativa real sería
+# firmar con Developer ID y notarizar, no disponible todavía. Por eso el servicio
+# corre como LaunchAgent del usuario con sesión gráfica activa, aunque este script
+# siga necesitando sudo para instalar archivos en rutas de sistema. Consecuencia
+# directa: el proceso que lee config.json y escribe el log en cada arranque ya no es
+# root, así que ambas rutas (config y log) necesitan permisos legibles/escribibles
+# por un usuario normal — ver PermsDirectorio/PermsArchivo en internal/config/
+# config_darwin.go y la creación de LOG_DIR más abajo.
 
 set -euo pipefail
 
 BINARY_NAME="cda"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/copime-agent"
-PLIST_PATH="/Library/LaunchDaemons/com.conasinf.copime-agent.plist"
+LOG_DIR="/Library/Logs/COPIME"
+PLIST_PATH="/Library/LaunchAgents/com.conasinf.copime-agent.plist"
 PLIST_LABEL="com.conasinf.copime-agent"
+
+# --- Detectar el usuario con sesión gráfica activa (dueño de /dev/console) ---
+# Un LaunchAgent en /Library/LaunchAgents se carga automáticamente, sin intervención
+# de este script, para CUALQUIER usuario que inicie sesión gráfica de aquí en
+# adelante — eso cubre el caso normal sin hacer nada más. Lo que sí necesita este
+# script es activar el servicio AHORA, en la sesión ya abierta, sin esperar a que ese
+# usuario cierre y vuelva a iniciar sesión; para eso hace falta el UID real de esa
+# sesión (root no tiene dominio "gui/<uid>" propio).
+detectar_uid_consola() {
+  local usuario
+  usuario="$(stat -f%Su /dev/console 2>/dev/null || true)"
+  if [ -z "$usuario" ] || [ "$usuario" = "root" ]; then
+    return 1
+  fi
+  id -u "$usuario" 2>/dev/null
+}
 
 # --- Verificar que corre como root ---
 if [ "$(id -u)" -ne 0 ]; then
@@ -57,10 +90,13 @@ done
 if [ "$UNINSTALL" = true ]; then
   echo "==> Desinstalando COPIME Desktop Agent..."
 
-  # Detener y retirar el servicio de launchd.
-  if launchctl list "$PLIST_LABEL" &>/dev/null; then
-    echo "  Retirando servicio de launchd..."
-    launchctl bootout system "$PLIST_PATH" 2>/dev/null || true
+  # Retirar el servicio de launchd. Es un LaunchAgent (dominio "gui/<uid>" del
+  # usuario con sesión gráfica), no un LaunchDaemon de sistema — ver nota al inicio
+  # del archivo — así que el bootout debe apuntar a ese dominio, no a "system".
+  CONSOLE_UID="$(detectar_uid_consola || true)"
+  if [ -n "$CONSOLE_UID" ] && launchctl print "gui/$CONSOLE_UID/$PLIST_LABEL" &>/dev/null; then
+    echo "  Retirando servicio de launchd (gui/$CONSOLE_UID)..."
+    launchctl bootout "gui/$CONSOLE_UID" "$PLIST_PATH" 2>/dev/null || true
   fi
 
   # Eliminar archivos del agente.
@@ -69,6 +105,7 @@ if [ "$UNINSTALL" = true ]; then
   [ -d "$CONFIG_DIR" ] && rm -rf "$CONFIG_DIR" && echo "  Eliminado: $CONFIG_DIR"
 
   echo "==> Desinstalación completa."
+  echo "    Nota: los logs en $LOG_DIR no se eliminan automáticamente."
   exit 0
 fi
 
@@ -156,9 +193,15 @@ else
   echo "  ADVERTENCIA: no se pudo verificar la firma ad-hoc del binario (continuando)." >&2
 fi
 
-# 2. Crear directorio de configuración con permisos restringidos.
-echo "  Creando directorio de configuración $CONFIG_DIR (modo 700)..."
-install -d -m 700 "$CONFIG_DIR"
+# 2. Crear directorio de configuración. Modo 755 (no 700): el servicio corre como
+#    LaunchAgent del usuario con sesión gráfica (ver nota de cabecera), así que ese
+#    usuario necesita poder LEER config.json en cada arranque. config.json en sí se
+#    escribe en modo 644 (ver internal/config/config_darwin.go) — contiene la llave
+#    de autenticación de ESTE dispositivo (alcance limitado a su propio endpoint de
+#    inventario, igual que en la instalación de Windows del mismo agente), nunca
+#    credenciales de usuario final.
+echo "  Creando directorio de configuración $CONFIG_DIR (modo 755)..."
+install -d -m 755 "$CONFIG_DIR"
 
 # 3. Ejecutar el enrolamiento (escribe config.json en CONFIG_DIR).
 echo "  Realizando enrolamiento con el servidor $SERVER..."
@@ -179,12 +222,38 @@ fi
 echo "  Instalando plist de launchd en $PLIST_PATH..."
 install -m 644 "$PLIST_SRC" "$PLIST_PATH"
 
-# 5. Registrar el servicio con launchd.
-echo "  Registrando servicio con launchctl..."
-launchctl bootstrap system "$PLIST_PATH"
+# 5. Crear el directorio de logs. El servicio corre como LaunchAgent del usuario
+#    (ver nota de cabecera), así que /var/log (root:wheel, modo 755) no sirve: ese
+#    usuario no puede escribir ahí y launchd no podría abrir StandardOutPath/
+#    StandardErrorPath del plist. /Library/Logs es la convención real de macOS para
+#    logs de aplicación compartidos entre usuarios; se deja en modo 755 y el archivo
+#    de log se pre-crea en modo 666 para que cualquier usuario pueda escribirlo sin
+#    abrir el directorio entero a creación de archivos arbitrarios.
+echo "  Creando directorio de logs $LOG_DIR..."
+install -d -m 755 "$LOG_DIR"
+touch "$LOG_DIR/copime-agent.log"
+chmod 666 "$LOG_DIR/copime-agent.log"
+
+# 6. Registrar el servicio con launchd como LaunchAgent (ver nota de cabecera: un
+#    LaunchDaemon de sistema falla con "Bootstrap failed: 5: Input/output error"
+#    contra la firma ad-hoc del binario; un LaunchAgent no).
+#
+#    Colocar el plist en /Library/LaunchAgents ya es suficiente para que macOS lo
+#    cargue automáticamente en cada sesión gráfica futura, de cualquier usuario, sin
+#    intervención de este script. El bootstrap explícito de abajo solo activa el
+#    servicio AHORA, en la sesión ya abierta, para no obligar a cerrar y volver a
+#    iniciar sesión.
+CONSOLE_UID="$(detectar_uid_consola || true)"
+if [ -n "$CONSOLE_UID" ]; then
+  echo "  Registrando servicio con launchctl (gui/$CONSOLE_UID)..."
+  launchctl asuser "$CONSOLE_UID" launchctl bootstrap "gui/$CONSOLE_UID" "$PLIST_PATH"
+else
+  echo "  No se detectó una sesión gráfica activa; el servicio se activará solo"
+  echo "  en el próximo inicio de sesión de cualquier usuario (no requiere reinstalar)."
+fi
 
 echo ""
 echo "==> COPIME Desktop Agent instalado y activo."
-echo "    Logs: /var/log/copime-agent.log"
+echo "    Logs: $LOG_DIR/copime-agent.log"
 echo "    Config: $CONFIG_DIR/config.json"
 echo "    Para desinstalar: sudo ./install.sh --uninstall"
