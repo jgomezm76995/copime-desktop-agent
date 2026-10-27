@@ -81,6 +81,13 @@ if "%UNINSTALL%"=="1" (
 
 REM --- Modo instalacion ---
 if "%SERVER%"=="" (
+    set /p "SERVER=URL del servidor COPIME (ej. https://conasinf.copime.net): "
+)
+if "%ENROLL_CODE%"=="" (
+    set /p "ENROLL_CODE=Codigo de enrolamiento: "
+)
+
+if "%SERVER%"=="" (
     echo ERROR: Se requieren --server y --enroll-code para la instalacion. >&2
     echo Uso: install.bat --server https://conasinf.copime.net --enroll-code XXXX-XXXX >&2
     exit /b 1
@@ -88,6 +95,11 @@ if "%SERVER%"=="" (
 if "%ENROLL_CODE%"=="" (
     echo ERROR: Se requieren --server y --enroll-code para la instalacion. >&2
     echo Uso: install.bat --server https://conasinf.copime.net --enroll-code XXXX-XXXX >&2
+    exit /b 1
+)
+set "SERVER_PREFIX=%SERVER:~0,4%"
+if not "%SERVER_PREFIX%"=="http" (
+    echo ERROR: La URL del servidor debe iniciar con http:// o https://. >&2
     exit /b 1
 )
 

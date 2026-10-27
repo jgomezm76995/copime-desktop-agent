@@ -74,8 +74,29 @@ fi
 
 # --- Modo instalación ---
 if [ -z "$SERVER" ] || [ -z "$ENROLL_CODE" ]; then
-  echo "ERROR: Se requieren --server y --enroll-code para la instalación." >&2
-  echo "Uso: sudo ./install.sh --server https://conasinf.copime.net --enroll-code XXXX-XXXX" >&2
+  # Sin TTY (p. ej. invocado desde un script automatizado) no hay a quién
+  # preguntarle: se mantiene el mismo error de uso de siempre, en vez de
+  # quedarse colgado esperando una entrada que nunca llega.
+  if [ ! -t 0 ]; then
+    echo "ERROR: Se requieren --server y --enroll-code para la instalación." >&2
+    echo "Uso: sudo ./install.sh --server https://conasinf.copime.net --enroll-code XXXX-XXXX" >&2
+    exit 1
+  fi
+
+  if [ -z "$SERVER" ]; then
+    read -r -p "URL del servidor COPIME (ej. https://conasinf.copime.net): " SERVER
+  fi
+  if [ -z "$ENROLL_CODE" ]; then
+    read -r -p "Código de enrolamiento: " ENROLL_CODE
+  fi
+fi
+
+if [ -z "$SERVER" ] || [[ ! "$SERVER" =~ ^https?:// ]]; then
+  echo "ERROR: La URL del servidor no puede estar vacía y debe iniciar con http:// o https://." >&2
+  exit 1
+fi
+if [ -z "$ENROLL_CODE" ]; then
+  echo "ERROR: El código de enrolamiento no puede estar vacío." >&2
   exit 1
 fi
 
@@ -109,6 +130,19 @@ fi
 # 1. Instalar el binario.
 echo "  Instalando binario ($ARCH) en $INSTALL_DIR/$BINARY_NAME..."
 install -m 755 "$BINARY_SRC" "$INSTALL_DIR/$BINARY_NAME"
+
+# En Apple Silicon el kernel exige al menos una firma ad-hoc para ejecutar
+# cualquier binario; uno sin firmar se mata con SIGKILL en el primer exec, sin
+# diálogo de Gatekeeper ni mensaje claro. `codesign` es una utilidad del
+# sistema (no de Xcode) presente en cualquier Mac real; el `|| true` evita
+# bloquear la instalación si un entorno atípico no la tiene disponible.
+echo "  Firmando el binario con identidad ad-hoc..."
+codesign --force --deep --sign - "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
+if codesign --verify "$INSTALL_DIR/$BINARY_NAME" &>/dev/null; then
+  echo "  Firma ad-hoc verificada."
+else
+  echo "  ADVERTENCIA: no se pudo verificar la firma ad-hoc del binario (continuando)." >&2
+fi
 
 # 2. Crear directorio de configuración con permisos restringidos.
 echo "  Creando directorio de configuración $CONFIG_DIR (modo 700)..."
