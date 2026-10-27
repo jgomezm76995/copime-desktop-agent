@@ -87,6 +87,15 @@ type Partition struct {
 	TotalMB    int64  `json:"total_mb"`
 }
 
+// Video representa una tarjeta gráfica (GPU) del equipo. Memory queda en 0 cuando la GPU usa
+// memoria unificada/compartida con la CPU (p.ej. Apple Silicon) en vez de VRAM dedicada: no hay
+// un tamaño propio que reportar en ese caso.
+type Video struct {
+	Name    string `json:"name"`
+	Memory  int    `json:"memory"` // MB
+	Chipset string `json:"chipset"`
+}
+
 // LiveMetrics es una foto del momento de uso de recursos (no histórico): CPU, RAM y disco
 // actuales. GPU se omite: requiere `powermetrics` con sudo en macOS, fuera del alcance de un
 // agente sin privilegios. Se envía siempre en el inventario periódico y, bajo demanda, en el
@@ -108,6 +117,7 @@ type Inventario struct {
 	Storages        []Storage       `json:"storages"`
 	Networks        []Network       `json:"networks"`
 	Softwares       []Software      `json:"softwares,omitempty"`
+	Videos          []Video         `json:"videos,omitempty"`
 	LiveMetrics     *LiveMetrics    `json:"live_metrics,omitempty"`
 }
 
