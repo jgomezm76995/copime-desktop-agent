@@ -90,6 +90,12 @@ func (d *DarwinCollector) RecolectarInventario() (*Inventario, error) {
 		return nil, fmt.Errorf("recolectar redes: %w", err)
 	}
 
+	videos, errVideos := recolectarGPU()
+	if errVideos != nil {
+		// GPU es opcional — registrar el error pero continuar (no bloquea el resto del inventario).
+		log.Printf("[ADVERTENCIA] No se pudo recolectar GPU: %v", errVideos)
+	}
+
 	// Esperar a que termine la recolección de software.
 	wg.Wait()
 	if errSoftware != nil {
@@ -112,6 +118,7 @@ func (d *DarwinCollector) RecolectarInventario() (*Inventario, error) {
 		Storages:        almacenamiento,
 		Networks:        redes,
 		Softwares:       softwares,
+		Videos:          videos,
 		LiveMetrics:     liveMetrics,
 	}, nil
 }
@@ -710,6 +717,72 @@ func parsearIfconfig(salida string, redes map[string]infoPuertoRed) []Network {
 // la interfaz: asume Ethernet, ya que en0 NO es siempre Wi-Fi (falso en Mac mini/Studio/Pro).
 func determinarTipoRed(nombre string) string {
 	return "Ethernet"
+}
+
+// spDisplaysData modela el JSON de `system_profiler SPDisplaysDataType -json`: una entrada por
+// GPU física (no por pantalla conectada). Verificado contra salida real: en Apple Silicon
+// `sppci_model`/`_name` traen el nombre del chip (p.ej. "Apple M4") y no hay VRAM dedicada
+// (memoria unificada); en Mac con GPU discreta aparece además `spdisplays_vram`.
+type spDisplaysData struct {
+	SPDisplaysDataType []struct {
+		Name   string `json:"_name"`
+		Model  string `json:"sppci_model"`
+		VRAM   string `json:"spdisplays_vram"`
+		Vendor string `json:"spdisplays_vendor"`
+	} `json:"SPDisplaysDataType"`
+}
+
+// vramPattern extrae el número y la unidad de cadenas como "4 GB" o "1536 MB".
+var vramPattern = regexp.MustCompile(`(?i)([\d.]+)\s*(GB|MB)`)
+
+// parseVRAMMB convierte la VRAM reportada por system_profiler a MB. Retorna 0 si no hay VRAM
+// dedicada que reportar (caso normal en GPU integrada con memoria unificada).
+func parseVRAMMB(s string) int {
+	m := vramPattern.FindStringSubmatch(s)
+	if m == nil {
+		return 0
+	}
+	valor, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0
+	}
+	if strings.EqualFold(m[2], "GB") {
+		return int(valor * 1024)
+	}
+	return int(valor)
+}
+
+// recolectarGPU usa `system_profiler SPDisplaysDataType -json`, sin sudo. Distinto de la
+// telemetría en vivo (RecolectarMetricasVivo): aquí solo se reporta el hardware, no el % de uso,
+// que sí requiere `powermetrics` con privilegios root.
+func recolectarGPU() ([]Video, error) {
+	salida, err := ejecutarComando("system_profiler", "SPDisplaysDataType", "-json")
+	if err != nil {
+		return nil, fmt.Errorf("system_profiler SPDisplaysDataType: %w", err)
+	}
+
+	var datos spDisplaysData
+	if err := json.Unmarshal([]byte(salida), &datos); err != nil {
+		return nil, fmt.Errorf("parsear JSON de GPU: %w", err)
+	}
+
+	var resultado []Video
+	for _, item := range datos.SPDisplaysDataType {
+		nombre := item.Model
+		if nombre == "" {
+			nombre = item.Name
+		}
+		if nombre == "" {
+			continue
+		}
+		resultado = append(resultado, Video{
+			Name:    nombre,
+			Memory:  parseVRAMMB(item.VRAM),
+			Chipset: strings.TrimPrefix(item.Vendor, "sppci_vendor_"),
+		})
+	}
+
+	return resultado, nil
 }
 
 // spApplicationData modela la estructura JSON de system_profiler SPApplicationsDataType.
