@@ -48,19 +48,126 @@ func NuevoCollector() Collector {
 	return &WindowsCollector{}
 }
 
-// ObtenerDeviceID retorna el UUID de Win32_ComputerSystemProduct, estable entre
-// reinicios (equivalente Windows del IOPlatformUUID que usa darwin.go).
+// ObtenerDeviceID retorna un identificador de hardware estable entre reinicios
+// (equivalente Windows del IOPlatformUUID que usa darwin.go).
+//
+// Orden de respaldo (cada eslabón solo se intenta si el anterior no entregó un
+// valor usable):
+//
+//  1. Win32_ComputerSystemProduct.UUID (SMBIOS, vía WMI): primera opción porque
+//     identifica el hardware/VM real, pero algunos hipervisores — VirtualBox es
+//     el caso confirmado en campo, a diferencia de VMware/Hyper-V/Parallels —
+//     no siempre exponen este valor SMBIOS al sistema invitado, y entonces WMI
+//     retorna una cadena vacía (no un error).
+//  2. MachineGuid del registro (HKLM\SOFTWARE\Microsoft\Cryptography): lo genera
+//     el propio Windows al instalarse, no depende de SMBIOS/hipervisor, es
+//     legible sin privilegios de administrador y es el identificador que usan
+//     varios agentes de inventario reales exactamente por este motivo. Esa
+//     clave de registro, a diferencia de la mayoría de HKLM\SOFTWARE, no se
+//     redirige a WOW6432Node — se lee igual en 32 y 64 bits.
+//  3. Win32_BIOS.SerialNumber, descartando los valores genéricos que varios
+//     fabricantes/hipervisores dejan sin configurar (ver
+//     esNumeroSerieBIOSGenerico).
+//
+// Si ningún eslabón entrega un valor usable, se falla con un error explícito en
+// vez de inventar un identificador: generar y persistir uno localmente exigiría
+// ampliar el contrato de Collector (hoy sin parámetros) y tocar config.go/
+// main.go/darwin.go para abrir una ruta de persistencia compartida — fuera del
+// alcance de este fix puntual de Windows, y no justificado sin evidencia de que
+// el caso "ningún identificador real disponible" ocurra en la práctica (los tres
+// eslabones de arriba ya cubren el caso de campo reportado).
 func (w *WindowsCollector) ObtenerDeviceID() (string, error) {
+	if uuid, err := obtenerUUIDComputerSystemProduct(); err != nil {
+		log.Printf("[ADVERTENCIA] No se pudo consultar Win32_ComputerSystemProduct.UUID: %v", err)
+	} else if uuid != "" {
+		return uuid, nil
+	} else {
+		log.Printf("[ADVERTENCIA] Win32_ComputerSystemProduct.UUID vacío (frecuente en VirtualBox); usando respaldo.")
+	}
+
+	if guid, err := obtenerMachineGUID(); err != nil {
+		log.Printf("[ADVERTENCIA] No se pudo leer MachineGuid del registro: %v", err)
+	} else if guid != "" {
+		return guid, nil
+	}
+
+	if serial, err := obtenerNumeroSerieBIOS(); err != nil {
+		log.Printf("[ADVERTENCIA] No se pudo consultar Win32_BIOS.SerialNumber: %v", err)
+	} else if serial != "" {
+		return serial, nil
+	}
+
+	return "", fmt.Errorf("no se encontró ningún identificador de hardware estable (UUID, MachineGuid ni número de serie de BIOS)")
+}
+
+// obtenerUUIDComputerSystemProduct consulta el UUID SMBIOS vía WMI. Retorna
+// cadena vacía sin error cuando WMI respondió pero el campo viene vacío (caso de
+// campo en VirtualBox): eso no es un fallo de la consulta, es la ausencia del
+// dato, y el llamador decide el respaldo.
+func obtenerUUIDComputerSystemProduct() (string, error) {
 	uuid, err := ejecutarPowerShellTexto(
 		`(Get-CimInstance Win32_ComputerSystemProduct).UUID`, 15*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("obtener UUID de Win32_ComputerSystemProduct: %w", err)
 	}
-	uuid = strings.TrimSpace(uuid)
-	if uuid == "" {
-		return "", fmt.Errorf("UUID de Win32_ComputerSystemProduct vacío")
+	return strings.TrimSpace(uuid), nil
+}
+
+// obtenerMachineGUID lee HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid, un
+// identificador generado por Windows al instalarse (no por el hipervisor), con
+// el mismo mecanismo de registro que ya usa recolectarSoftware() en este archivo.
+func obtenerMachineGUID() (string, error) {
+	clave, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.READ)
+	if err != nil {
+		return "", fmt.Errorf("abrir HKLM\\SOFTWARE\\Microsoft\\Cryptography: %w", err)
 	}
-	return uuid, nil
+	defer clave.Close()
+
+	guid, _, err := clave.GetStringValue("MachineGuid")
+	if err != nil {
+		return "", fmt.Errorf("leer MachineGuid: %w", err)
+	}
+	return strings.TrimSpace(guid), nil
+}
+
+// obtenerNumeroSerieBIOS consulta Win32_BIOS.SerialNumber y descarta los
+// valores genéricos conocidos (ver esNumeroSerieBIOSGenerico), retornando cadena
+// vacía sin error en ese caso para que el llamador falle con un mensaje claro en
+// vez de adoptar un identificador inútil que colisionaría entre equipos distintos.
+func obtenerNumeroSerieBIOS() (string, error) {
+	serial, err := ejecutarPowerShellTexto(
+		`(Get-CimInstance Win32_BIOS).SerialNumber`, 15*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("obtener Win32_BIOS.SerialNumber: %w", err)
+	}
+	serial = strings.TrimSpace(serial)
+	if esNumeroSerieBIOSGenerico(serial) {
+		return "", nil
+	}
+	return serial, nil
+}
+
+// numerosSerieBIOSGenericos son los valores de relleno que varios fabricantes y
+// virtualizadores dejan en Win32_BIOS.SerialNumber cuando no configuran un
+// número de serie real — adoptarlos como DeviceID haría que equipos distintos
+// con el mismo valor de relleno colisionen en el servidor.
+var numerosSerieBIOSGenericos = map[string]bool{
+	"":                       true,
+	"0":                      true,
+	"system serial number":   true,
+	"default string":         true,
+	"not specified":          true,
+	"to be filled by o.e.m.": true,
+	"none":                   true,
+	"n/a":                    true,
+	"serial number":          true,
+	"invalid":                true,
+	"0123456789":             true,
+	"123456789":              true,
+}
+
+func esNumeroSerieBIOSGenerico(serial string) bool {
+	return numerosSerieBIOSGenericos[strings.ToLower(strings.TrimSpace(serial))]
 }
 
 // RecolectarInventario recopila todos los datos del sistema Windows.
