@@ -18,6 +18,22 @@ name: Release
 # siendo quien decide, descarga y registra la versión vigente vía
 # `PUT /support-assets/config/agent-installer` — este workflow solo le da algo real que
 # descargar y un SHA-256 verificable para ese registro.
+#
+# Bundle .zip (TT11511, incidente de instalación real): publicar SOLO el binario suelto
+# dejaba al usuario sin `install.bat`/`install.sh` — el propio manual de ERP_Copime da por
+# sentado que vienen juntos, y sin el script el equipo "enrola" (el binario sin flags solo
+# escribe la configuración) pero nunca entra en modo daemon ni queda registrado como
+# servicio, así que el inventario nunca se alimenta. Este workflow sigue publicando los
+# binarios sueltos (por si sirven para otro uso: instalación manual, depuración) y ADEMÁS
+# empaqueta un `.zip` autosuficiente por plataforma con el binario + su(s) script(s) de
+# instalación:
+#   - macOS: ambos binarios SIN el sufijo de versión (`cda-darwin-arm64`, `cda-darwin-amd64`
+#     — los nombres que `install/install.sh` busca junto a sí mismo según `uname -m`) +
+#     `install.sh` + `com.conasinf.copime-agent.plist`.
+#   - Windows: `install/install.bat` no distingue arquitectura (busca un `cda.exe` fijo,
+#     sin selección por `uname`/variable de entorno equivalente); se empaqueta la variante
+#     amd64, la que cubre la inmensa mayoría de equipos Windows reales — el binario arm64
+#     sigue publicado suelto, sin zip, para instalación manual en los pocos equipos ARM.
 on:
   push:
     tags:
@@ -73,6 +89,24 @@ jobs:
             -ldflags "-X main.version=${{ steps.ver.outputs.version }}" \
             -o dist/cda-windows-arm64-${{ steps.ver.outputs.version }}.exe ./cmd/agent/
 
+      - name: Empaquetar .zip de instalación por plataforma (TT11511)
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+
+          mkdir -p dist/pkg-macos
+          cp "dist/cda-darwin-arm64-${VERSION}" dist/pkg-macos/cda-darwin-arm64
+          cp "dist/cda-darwin-amd64-${VERSION}" dist/pkg-macos/cda-darwin-amd64
+          cp install/install.sh dist/pkg-macos/install.sh
+          cp install/com.conasinf.copime-agent.plist dist/pkg-macos/com.conasinf.copime-agent.plist
+          chmod +x dist/pkg-macos/cda-darwin-arm64 dist/pkg-macos/cda-darwin-amd64 dist/pkg-macos/install.sh
+          (cd dist/pkg-macos && zip -X "../copime-agent-${VERSION}-macos.zip" cda-darwin-arm64 cda-darwin-amd64 install.sh com.conasinf.copime-agent.plist)
+
+          mkdir -p dist/pkg-windows
+          cp "dist/cda-windows-amd64-${VERSION}.exe" dist/pkg-windows/cda.exe
+          cp install/install.bat dist/pkg-windows/install.bat
+          (cd dist/pkg-windows && zip -X "../copime-agent-${VERSION}-windows.zip" cda.exe install.bat)
+
       - name: Checksums SHA-256
         run: |
           cd dist
@@ -80,6 +114,8 @@ jobs:
                          cda-darwin-amd64-${{ steps.ver.outputs.version }} \
                          cda-windows-amd64-${{ steps.ver.outputs.version }}.exe \
                          cda-windows-arm64-${{ steps.ver.outputs.version }}.exe \
+                         copime-agent-${{ steps.ver.outputs.version }}-macos.zip \
+                         copime-agent-${{ steps.ver.outputs.version }}-windows.zip \
             > checksums-${{ steps.ver.outputs.version }}.txt
           cat checksums-${{ steps.ver.outputs.version }}.txt
 
@@ -93,4 +129,6 @@ jobs:
             dist/cda-darwin-amd64-${{ steps.ver.outputs.version }}
             dist/cda-windows-amd64-${{ steps.ver.outputs.version }}.exe
             dist/cda-windows-arm64-${{ steps.ver.outputs.version }}.exe
+            dist/copime-agent-${{ steps.ver.outputs.version }}-macos.zip
+            dist/copime-agent-${{ steps.ver.outputs.version }}-windows.zip
             dist/checksums-${{ steps.ver.outputs.version }}.txt
