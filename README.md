@@ -56,10 +56,26 @@ sudo ./install.sh --server https://conasinf.copime.net --enroll-code XXXX-XXXX
 
 El instalador:
 1. Copia el binario a `/usr/local/bin/cda`
-2. Crea `/etc/copime-agent/` con permisos 700
+2. Crea `/etc/copime-agent/` con permisos 755 (el servicio lee `config.json` como
+   usuario normal, no como root — ver "Configuración" y "LaunchAgent, no
+   LaunchDaemon" más abajo)
 3. Ejecuta el enrolamiento y guarda `config.json`
-4. Instala el plist en `/Library/LaunchDaemons/`
-5. Registra el servicio con `launchctl bootstrap`
+4. Instala el plist en `/Library/LaunchAgents/` y crea `/Library/Logs/COPIME/`
+5. Registra el servicio con `launchctl bootstrap` en el dominio `gui/<uid>` del
+   usuario con sesión gráfica activa
+
+### LaunchAgent, no LaunchDaemon
+
+El servicio se registra como **LaunchAgent** (dominio `gui/<uid>`, corre como el
+usuario con sesión activa), no como LaunchDaemon de sistema (dominio `system`, root).
+Verificado en una Mac real: launchd acepta la firma ad-hoc del binario (necesaria en
+Apple Silicon sin Developer ID/notarización — ver `codesign` en `install.sh`) al
+registrar un LaunchAgent, pero la rechaza con `Bootstrap failed: 5: Input/output
+error` al registrar un LaunchDaemon de sistema con ese mismo binario. La recolección
+de inventario (`internal/inventory/darwin.go`) no necesita privilegios de root en
+ningún punto — usa solo herramientas de usuario normal (`system_profiler`, `sysctl`,
+`ifconfig`, `ioreg`, `df`, `diskutil`, `networksetup`, `top`, `vm_stat`) — así que
+este cambio no le quita ninguna capacidad real al agente.
 
 ## Instalación en Windows
 
@@ -115,7 +131,11 @@ cda.exe --uninstall-service
 
 ## Configuración
 
-- macOS/Linux: `/etc/copime-agent/config.json` (permisos 0600, dueño root)
+- macOS: `/etc/copime-agent/config.json` (permisos 0644 — el LaunchAgent lee este
+  archivo como el usuario con sesión gráfica, no como root; ver "LaunchAgent, no
+  LaunchDaemon" arriba)
+- Linux: `/etc/copime-agent/config.json` (permisos 0600, dueño root — sin cambios;
+  no hay implementación del collector para Linux todavía, ver "Releases publicados")
 - Windows: `%ProgramData%\COPIME\copime-agent\config.json`
 
 ```json
@@ -140,8 +160,9 @@ copime-desktop-agent/
   internal/
     config/
       config.go                             Lectura/escritura de config.json (multiplataforma)
-      config_unix.go                        RutaConfig por defecto en macOS/Linux (build tag: !windows)
-      config_windows.go                     RutaConfig por defecto en Windows (build tag: windows)
+      config_unix.go                        RutaConfig/permisos por defecto en Linux (build tag: !windows && !darwin)
+      config_darwin.go                      RutaConfig/permisos por defecto en macOS (build tag: darwin)
+      config_windows.go                     RutaConfig/permisos por defecto en Windows (build tag: windows)
     enroll/enroll.go                         Flujo de enrolamiento con el servidor
     inventory/
       collector.go                           Interfaz Collector + tipos de datos
@@ -149,15 +170,18 @@ copime-desktop-agent/
       windows.go                             Implementación Windows (build tag: windows)
     sender/sender.go                         HTTP client con auth Basic, retry y backoff
   install/
-    install.sh                               Instalador macOS (launchd)
-    com.conasinf.copime-agent.plist          Plist de launchd
+    install.sh                               Instalador macOS (launchd, LaunchAgent)
+    com.conasinf.copime-agent.plist          Plist de launchd (LaunchAgent)
     install.bat                              Instalador Windows (SCM)
   README.md
 ```
 
 ## Logs
 
-- macOS: el daemon escribe en `/var/log/copime-agent.log` (vía StandardOutPath del plist).
+- macOS: el daemon escribe en `/Library/Logs/COPIME/copime-agent.log` (vía
+  StandardOutPath del plist) — no en `/var/log`, porque el LaunchAgent corre como
+  usuario normal y no tiene permiso de escritura ahí (ver "LaunchAgent, no
+  LaunchDaemon" arriba).
 - Windows: el servicio escribe en `%ProgramData%\COPIME\copime-agent\copime-agent.log` (el SCM no redirige stdout/stderr por sí solo).
 
 ```

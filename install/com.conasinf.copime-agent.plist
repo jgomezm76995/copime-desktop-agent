@@ -13,8 +13,8 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/var/log/copime-agent.log</string>
+    <string>/Library/Logs/COPIME/copime-agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/copime-agent.log</string>
+    <string>/Library/Logs/COPIME/copime-agent.log</string>
 </dict>
 </plist>
